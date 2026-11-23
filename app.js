@@ -509,7 +509,7 @@ async function smallBitmap(src, w, h) {
 
 function startLive() {
   ensureWorker();
-  Object.assign(live, { raw: null, target: null, shown: null, misses: 0, stableSince: 0, state: 'none', armed: true, busy: false });
+  Object.assign(live, { raw: null, target: null, shown: null, misses: 0, stableSince: 0, state: 'none', armed: true, busy: false, hist: [], consistent: false, lostSince: 0, shotQuad: null });
   updateLiveUi(performance.now());
   clearInterval(live.timer); live.timer = setInterval(liveTick, live.worker ? 160 : 450);
   cancelAnimationFrame(live.raf); live.raf = requestAnimationFrame(drawLive);
@@ -525,32 +525,55 @@ async function liveTick() {
   live.busy = true;
   try {
     live.vw = v.videoWidth; live.vh = v.videoHeight;
-    const q = await detectAsync(await smallBitmap(v, v.videoWidth, v.videoHeight), { prior: live.raw });
+    const q = await detectAsync(await smallBitmap(v, v.videoWidth, v.videoHeight), { prior: live.raw, allowBorder: false });
     onLive(q);
   } catch (e) { console.warn(e); }
   live.busy = false;
 }
+// Penstabil: garis = nilai tengah dari hasil-hasil terakhir yang saling cocok.
+// Hasil yang sesekali meleset diabaikan, jadi garis tidak lari-lari.
+const median = (a) => { const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const medianQuad = (qs) => [0, 1, 2, 3].map((i) => [median(qs.map((q) => q[i][0])), median(qs.map((q) => q[i][1]))]);
 function onLive(q) {
   if (!cam.stream) return;
   const now = performance.now();
-  if (!q) {
-    if (++live.misses >= 3) { live.raw = live.target = null; live.stableSince = 0; live.armed = true; }
+  live.hist.push(q); if (live.hist.length > 5) live.hist.shift();
+  const valid = live.hist.filter(Boolean);
+  let stable = null;
+  live.consistent = false;
+  if (valid.length >= 2) {
+    const m = medianQuad(valid);
+    const inl = valid.filter((x) => maxMove(x, m) < 0.04);
+    if (inl.length >= 2 && inl.length * 2 >= valid.length) {
+      stable = medianQuad(inl);
+      live.consistent = inl.length >= 3; // "Pas" hanya bila ≥3 hasil terakhir saling cocok
+    }
+  }
+  // Jepret otomatis siap lagi hanya bila halaman benar-benar berganti:
+  // garis hilang ≥1,5 detik (tangan membalik halaman) atau dokumen bergeser jauh dari posisi jepretan terakhir.
+  if (!stable) {
+    if (++live.misses >= 3) {
+      live.raw = live.target = null; live.stableSince = 0;
+      if (!live.lostSince) live.lostSince = now;
+    }
+    if (live.lostSince && now - live.lostSince >= 1500) live.armed = true;
   } else {
     live.misses = 0;
-    const moved = live.raw ? maxMove(q, live.raw) : 1;
-    live.raw = q;
-    if (moved > 0.03) { live.stableSince = now; if (moved > 0.06) live.armed = true; }
-    live.target = live.target && maxMove(q, live.target) < 0.08
-      ? live.target.map((p, i) => [p[0] * 0.4 + q[i][0] * 0.6, p[1] * 0.4 + q[i][1] * 0.6])
-      : q;
+    if (live.lostSince && now - live.lostSince >= 1500) live.armed = true;
+    live.lostSince = 0;
+    if (live.shotQuad && maxMove(stable, live.shotQuad) > 0.08) live.armed = true;
+    const moved = live.raw ? maxMove(stable, live.raw) : 1;
+    live.raw = stable;
+    if (moved > 0.04) live.stableSince = now;
+    live.target = stable;
   }
   updateLiveUi(now);
 }
 function updateLiveUi(now) {
   const hint = $('#camHint'), shutter = $('#camShutter');
   const stableFor = live.raw ? now - live.stableSince : 0;
-  live.state = !live.raw ? 'none' : stableFor >= 600 ? 'pas' : 'gerak';
-  let text = 'Arahkan kamera ke dokumen', cls = '';
+  live.state = !live.raw ? 'none' : stableFor >= 600 && live.consistent ? 'pas' : 'gerak';
+  let text = 'Masukkan seluruh dokumen ke layar', cls = '';
   if (live.state === 'gerak') { text = 'Tahan HP agar diam…'; cls = 'wait'; }
   if (live.state === 'pas') {
     cls = 'ok';
@@ -605,19 +628,33 @@ async function shoot(isAuto) {
   const rot = photoRot();          // arah HP saat jepret → hasil otomatis tegak
   live.armed = false; live.lastShot = performance.now();
   const hint = live.raw ? live.raw.map((p) => p.slice()) : null;
+  live.shotQuad = hint;
   const hintAspect = live.vw / live.vh;
-  const f = $('#camFlash'); f.classList.add('go'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('go')));
-  if (navigator.vibrate) navigator.vibrate(isAuto ? [20, 60, 20] : 30);
+  const feedback = () => {
+    const f = $('#camFlash'); f.classList.add('go'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('go')));
+    if (navigator.vibrate) navigator.vibrate(isAuto ? [20, 60, 20] : 30);
+  };
+  if (!isAuto) feedback();
   try {
     const full = await grabPhoto();
+    // sudut: deteksi ulang pada foto yang benar-benar diambil (latar belakang)
+    let corners = await detectAsync(await smallBitmap(full, full.width, full.height), { prior: hint, allowBorder: false });
+    const sameView = hint && Math.abs(full.width / full.height - hintAspect) < 0.03 * hintAspect;
+    const cocok = corners && sameView && maxMove(corners, hint) <= 0.05;
+    if (isAuto && !cocok) {
+      // Jepret otomatis yang telat (mis. tangan sudah menutupi / halaman sudah dibalik): buang, coba lagi nanti.
+      full.close && full.close();
+      state.nextOrder = Math.max(state.nextOrder, order + 1);
+      live.armed = true; live.shotQuad = null;
+      shooting--;
+      return;
+    }
+    if (isAuto) feedback();
+    // Yang tersimpan harus sama dengan garis hijau yang terlihat: kalau hasilnya beda jauh, pakai garis di layar.
+    if (sameView && !cocok) corners = hint;
     cam.count++;
     $('#camCount').textContent = cam.count; $('#camCount').hidden = false;
     setLastThumb(full, rot);
-    // sudut: deteksi ulang pada foto yang diambil (latar belakang).
-    // Yang tersimpan harus sama dengan garis hijau yang terlihat: kalau hasilnya beda jauh, pakai garis di layar.
-    let corners = await detectAsync(await smallBitmap(full, full.width, full.height), { prior: hint });
-    const sameView = hint && Math.abs(full.width / full.height - hintAspect) < 0.03 * hintAspect;
-    if (sameView && (!corners || maxMove(corners, hint) > 0.05)) corners = hint;
     await addPage(full, { corners, order, rot });
   } catch (e) { toast('Gagal mengambil foto: ' + e.message); }
   shooting--;
