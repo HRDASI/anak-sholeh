@@ -248,166 +248,11 @@ function applyFilter(img, filter) {
   }
 }
 
-/* ================= Deteksi sudut dokumen otomatis ================= */
-// Cari kertas (area terang & tidak berwarna) terbesar, lalu ambil segi empat terbesar di dalam batasnya.
-// Hasil: [tl, tr, br, bl] dalam 0..1, atau null bila tidak yakin.
-
-function boxBlur(src, w, h, r) {
-  const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    let acc = 0, cnt = 0; const row = y * w;
-    for (let x = -r; x < w + r; x++) {
-      if (x + r < w && x + r >= 0) { acc += src[row + x + r]; cnt++; }
-      if (x - r - 1 >= 0) { acc -= src[row + x - r - 1]; cnt--; }
-      if (x >= 0) tmp[row + x] = acc / cnt;
-    }
-  }
-  for (let x = 0; x < w; x++) {
-    let acc = 0, cnt = 0;
-    for (let y = -r; y < h + r; y++) {
-      if (y + r < h && y + r >= 0) { acc += tmp[(y + r) * w + x]; cnt++; }
-      if (y - r - 1 >= 0) { acc -= tmp[(y - r - 1) * w + x]; cnt--; }
-      if (y >= 0) out[y * w + x] = acc / cnt;
-    }
-  }
-  return out;
-}
-// erosi (keepAll=true) / dilasi (keepAll=false) dengan kotak (2r+1)
-function morph(m, w, h, r, keepAll) {
-  const f = new Float32Array(w * h);
-  for (let i = 0; i < f.length; i++) f[i] = m[i];
-  const b = boxBlur(f, w, h, r), o = new Uint8Array(w * h);
-  for (let i = 0; i < o.length; i++) o[i] = keepAll ? (b[i] > 0.999 ? 1 : 0) : (b[i] > 0.001 ? 1 : 0);
-  return o;
-}
-function otsu(v, lo, hi) {
-  const bins = 256, hist = new Float64Array(bins), k = (bins - 1) / (hi - lo);
-  for (let i = 0; i < v.length; i++) hist[Math.round((v[i] - lo) * k)]++;
-  let sum = 0; for (let i = 0; i < bins; i++) sum += i * hist[i];
-  let wB = 0, sB = 0, best = 0, t = 0;
-  for (let i = 0; i < bins; i++) {
-    wB += hist[i]; if (!wB) continue;
-    const wF = v.length - wB; if (!wF) break;
-    sB += i * hist[i];
-    const mB = sB / wB, mF = (sum - sB) / wF, between = wB * wF * (mB - mF) * (mB - mF);
-    if (between > best) { best = between; t = i; }
-  }
-  return lo + (t + 0.5) / k;
-}
-const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-function convexHull(pts) {
-  pts = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const lower = [], upper = [];
-  for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
-  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
-  lower.pop(); upper.pop();
-  return lower.concat(upper);
-}
-function polyArea(q) { let a = 0; for (let i = 0; i < q.length; i++) { const p = q[i], n = q[(i + 1) % q.length]; a += p[0] * n[1] - n[0] * p[1]; } return Math.abs(a) / 2; }
-// segi empat dengan luas (hampir) terbesar yang titiknya ada di hull
-function maxAreaQuad(hull) {
-  const n = hull.length;
-  const pick = (f) => { let bi = 0, bv = -Infinity; hull.forEach((p, i) => { const v = f(p); if (v > bv) { bv = v; bi = i; } }); return bi; };
-  let idx = [pick((p) => -p[0] - p[1]), pick((p) => p[0] - p[1]), pick((p) => p[0] + p[1]), pick((p) => p[1] - p[0])];
-  idx = [...new Set(idx)].sort((a, b) => a - b);
-  if (idx.length < 4) return null;
-  for (let iter = 0; iter < 12; iter++) {
-    let changed = false;
-    for (let k = 0; k < 4; k++) {
-      const a = hull[idx[(k + 3) % 4]], b = hull[idx[(k + 1) % 4]];
-      let j = (idx[(k + 3) % 4] + 1) % n, best = idx[k], bestV = Math.abs(cross(a, b, hull[idx[k]]));
-      while (j !== idx[(k + 1) % 4]) {
-        const v = Math.abs(cross(a, b, hull[j]));
-        if (v > bestV + 1e-9) { bestV = v; best = j; }
-        j = (j + 1) % n;
-      }
-      if (best !== idx[k]) { idx[k] = best; changed = true; }
-    }
-    if (!changed) break;
-  }
-  return idx.map((i) => hull[i]);
-}
-function orderCorners(q) {
-  const cx = q.reduce((s, p) => s + p[0], 0) / 4, cy = q.reduce((s, p) => s + p[1], 0) / 4;
-  const s = q.slice().sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
-  let start = 0; s.forEach((p, i) => { if (p[0] + p[1] < s[start][0] + s[start][1]) start = i; });
-  return [0, 1, 2, 3].map((i) => s[(start + i) % 4]);
-}
-
-function detectCorners(src) {
-  try {
-    const W = src.width, H = src.height;
-    const sc = Math.min(1, 360 / Math.max(W, H));
-    const w = Math.max(16, Math.round(W * sc)), h = Math.max(16, Math.round(H * sc));
-    const c = makeCanvas(w, h); const x = c.getContext('2d');
-    x.imageSmoothingQuality = 'high'; x.drawImage(src, 0, 0, w, h);
-    const d = x.getImageData(0, 0, w, h).data, n = w * h;
-    let v = new Float32Array(n);
-    for (let i = 0, j = 0; i < n; i++, j += 4) {
-      const r = d[j], g = d[j + 1], b = d[j + 2];
-      v[i] = 0.299 * r + 0.587 * g + 0.114 * b - 0.8 * (Math.max(r, g, b) - Math.min(r, g, b));
-    }
-    v = boxBlur(v, w, h, 2);
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < n; i++) { if (v[i] < lo) lo = v[i]; if (v[i] > hi) hi = v[i]; }
-    if (hi - lo < 30) return null;
-    const t = otsu(v, lo, hi);
-    let m = new Uint8Array(n);
-    for (let i = 0; i < n; i++) m[i] = v[i] > t ? 1 : 0;
-    m = morph(morph(m, w, h, 2, true), w, h, 2, false); // opening: putus sambungan tipis
-
-    // komponen terang terbesar
-    const lab = new Int32Array(n), stack = new Int32Array(n);
-    let bestLab = 0, bestSize = 0, cur = 0;
-    for (let s = 0; s < n; s++) {
-      if (!m[s] || lab[s]) continue;
-      cur++; let sp = 0, size = 0; stack[sp++] = s; lab[s] = cur;
-      while (sp) {
-        const p = stack[--sp]; size++;
-        const px = p % w;
-        if (px > 0 && m[p - 1] && !lab[p - 1]) { lab[p - 1] = cur; stack[sp++] = p - 1; }
-        if (px < w - 1 && m[p + 1] && !lab[p + 1]) { lab[p + 1] = cur; stack[sp++] = p + 1; }
-        if (p >= w && m[p - w] && !lab[p - w]) { lab[p - w] = cur; stack[sp++] = p - w; }
-        if (p < n - w && m[p + w] && !lab[p + w]) { lab[p + w] = cur; stack[sp++] = p + w; }
-      }
-      if (size > bestSize) { bestSize = size; bestLab = cur; }
-    }
-    if (bestSize < 0.1 * n) return null;
-
-    // bila komponen menutupi sebagian besar tepi foto, kemungkinan itu latar / kertas memenuhi foto
-    let edge = 0, edgeOn = 0;
-    for (let xx = 0; xx < w; xx++) { edge += 2; edgeOn += (lab[xx] === bestLab) + (lab[(h - 1) * w + xx] === bestLab); }
-    for (let yy = 0; yy < h; yy++) { edge += 2; edgeOn += (lab[yy * w] === bestLab) + (lab[yy * w + w - 1] === bestLab); }
-    if (edgeOn / edge > 0.5) return null;
-
-    const pts = [];
-    for (let yy = 0; yy < h; yy++) {
-      let a = -1, b = -1;
-      for (let xx = 0; xx < w; xx++) if (lab[yy * w + xx] === bestLab) { if (a < 0) a = xx; b = xx; }
-      if (a >= 0) { pts.push([a, yy]); pts.push([b + 1, yy]); pts.push([a, yy + 1]); pts.push([b + 1, yy + 1]); }
-    }
-    const hull = convexHull(pts);
-    if (hull.length < 4) return null;
-    const q = maxAreaQuad(hull);
-    if (!q) return null;
-    const area = polyArea(q) / n;
-    if (area < 0.1 || area > 0.97) return null;
-    // sudut terlalu lancip = bukan dokumen
-    const oc = orderCorners(q);
-    for (let i = 0; i < 4; i++) {
-      const a = oc[(i + 3) % 4], b = oc[i], c2 = oc[(i + 1) % 4];
-      const v1 = [a[0] - b[0], a[1] - b[1]], v2 = [c2[0] - b[0], c2[1] - b[1]];
-      const cos = (v1[0] * v2[0] + v1[1] * v2[1]) / (Math.hypot(...v1) * Math.hypot(...v2) + 1e-9);
-      if (Math.abs(cos) > 0.75) return null; // di luar ~41°..139°
-    }
-    return oc.map(([px, py]) => [clamp(px / w, 0, 1), clamp(py / h, 0, 1)]);
-  } catch (e) { console.warn('deteksi gagal', e); return null; }
-}
-
 /* ================= Halaman ================= */
-async function addPage(fileOrBlob) {
-  const order = state.nextOrder++;
-  const bmp = await decode(fileOrBlob);
+// src: File/Blob atau ImageBitmap. opts.corners: sudut yang sudah dideteksi (null = seluruh foto).
+async function addPage(src, opts = {}) {
+  const order = opts.order || state.nextOrder++;
+  const bmp = typeof ImageBitmap !== 'undefined' && src instanceof ImageBitmap ? src : await decode(src);
   const s = Math.min(1, MAX_STORE / Math.max(bmp.width, bmp.height));
   const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
   const c = makeCanvas(w, h);
@@ -415,7 +260,7 @@ async function addPage(fileOrBlob) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bmp, 0, 0, w, h);
   bmp.close && bmp.close();
-  const auto = detectCorners(c);
+  const auto = 'corners' in opts ? opts.corners : Detect.detectCorners(c);
   const blob = await toBlob(c, 'image/jpeg', 0.9);
   const p = { id: uid(), blob, w, h, corners: auto || FULL.map((x) => x.slice()), filter: state.lastFilter, order };
   state.pages.push(p);
@@ -517,7 +362,7 @@ async function openCamera() {
   }
   cam.track = cam.stream.getVideoTracks()[0];
   cam.count = 0; cam.torch = false;
-  $('#camCount').textContent = '0 foto';
+  $('#camCount').textContent = '0'; $('#camCount').hidden = true;
   $('#camLast').hidden = true;
   const caps = cam.track.getCapabilities ? cam.track.getCapabilities() : {};
   $('#camTorch').hidden = !caps.torch;
@@ -525,52 +370,196 @@ async function openCamera() {
   try { cam.track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {}); } catch (e) {}
   const v = $('#camVideo'); v.srcObject = cam.stream;
   $('#camera').hidden = false;
+  markAuto();
   pushOverlay(closeCamera);
+  startLive();
 }
 
 function closeCamera() {
+  stopLive();
   if (cam.stream) cam.stream.getTracks().forEach((t) => t.stop());
   cam.stream = cam.track = null;
   $('#camVideo').srcObject = null;
   $('#camera').hidden = true;
-  if (cam.count) toast(`${cam.count} foto ditambahkan. Ketuk halaman untuk merapikan.`);
+  if (cam.count) toast(`${cam.count} foto ditambahkan. Ketuk halaman bila perlu dirapikan.`);
 }
 
+// Hasil: ImageBitmap (tanpa encode JPEG di sini supaya cepat; encode sekali saat disimpan)
 async function grabPhoto() {
   const v = $('#camVideo');
   const vw = v.videoWidth, vh = v.videoHeight;
   if ((!vw || Math.max(vw, vh) < 1900) && 'ImageCapture' in window) {
     try {
       const ic = new ImageCapture(cam.track);
-      return await Promise.race([
+      const blob = await Promise.race([
         ic.takePhoto(),
         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
       ]);
+      return await decode(blob);
     } catch (e) { console.warn('takePhoto gagal, pakai frame video', e); }
   }
   if (!vw) throw new Error('Kamera belum siap');
-  const c = makeCanvas(vw, vh);
-  c.getContext('2d').drawImage(v, 0, 0, vw, vh);
-  return toBlob(c, 'image/jpeg', 0.92);
+  return createImageBitmap(v);
+}
+function setLastThumb(bmp) {
+  const s = 112 / Math.max(bmp.width, bmp.height);
+  const c = makeCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  const last = $('#camLast'); last.src = c.toDataURL('image/jpeg', 0.7); last.hidden = false;
 }
 
+/* ---- Deteksi langsung di layar kamera ---- */
+const live = {
+  worker: null, reqId: 0, pending: new Map(), busy: false, timer: 0, raf: 0,
+  raw: null, target: null, shown: null, misses: 0, stableSince: 0, state: 'none',
+  armed: true, auto: false, lastShot: 0, vw: 0, vh: 0,
+};
+try { live.auto = localStorage.getItem('as.autoShot') === '1'; } catch (e) {}
+const maxMove = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
+
+function ensureWorker() {
+  if (live.worker || !('Worker' in window) || typeof OffscreenCanvas === 'undefined') return;
+  try {
+    live.worker = new Worker('detect-worker.js');
+    live.worker.onmessage = (e) => { const r = live.pending.get(e.data.id); if (r) { live.pending.delete(e.data.id); r(e.data.q); } };
+    live.worker.onerror = (e) => { console.warn('worker', e); live.worker = null; live.pending.forEach((r) => r(null)); live.pending.clear(); };
+  } catch (e) { live.worker = null; }
+}
+// deteksi di worker (latar belakang); kalau tidak ada worker, di halaman
+function detectAsync(bmp, opts = {}) {
+  if (!live.worker) {
+    let q = null;
+    try { const r = Detect.detectByLines(bmp, opts); if (r) q = r.q; } catch (e) {}
+    bmp.close && bmp.close();
+    return Promise.resolve(q);
+  }
+  return new Promise((res) => {
+    const id = ++live.reqId;
+    live.pending.set(id, res);
+    live.worker.postMessage({ id, bmp, opts }, [bmp]);
+    setTimeout(() => { if (live.pending.has(id)) { live.pending.delete(id); res(null); } }, 5000);
+  });
+}
+async function smallBitmap(src, w, h) {
+  const s = Math.min(1, 480 / Math.max(w, h));
+  return createImageBitmap(src, { resizeWidth: Math.max(1, Math.round(w * s)), resizeHeight: Math.max(1, Math.round(h * s)), resizeQuality: 'medium' });
+}
+
+function startLive() {
+  ensureWorker();
+  Object.assign(live, { raw: null, target: null, shown: null, misses: 0, stableSince: 0, state: 'none', armed: true, busy: false });
+  updateLiveUi(performance.now());
+  clearInterval(live.timer); live.timer = setInterval(liveTick, live.worker ? 160 : 450);
+  cancelAnimationFrame(live.raf); live.raf = requestAnimationFrame(drawLive);
+}
+function stopLive() {
+  clearInterval(live.timer); cancelAnimationFrame(live.raf);
+  live.timer = live.raf = 0; live.target = live.shown = null;
+  const c = $('#camOverlay'); c.getContext('2d').clearRect(0, 0, c.width, c.height);
+}
+async function liveTick() {
+  const v = $('#camVideo');
+  if (!cam.stream || live.busy || !v.videoWidth || document.hidden) return;
+  live.busy = true;
+  try {
+    live.vw = v.videoWidth; live.vh = v.videoHeight;
+    const q = await detectAsync(await smallBitmap(v, v.videoWidth, v.videoHeight), { prior: live.raw });
+    onLive(q);
+  } catch (e) { console.warn(e); }
+  live.busy = false;
+}
+function onLive(q) {
+  if (!cam.stream) return;
+  const now = performance.now();
+  if (!q) {
+    if (++live.misses >= 3) { live.raw = live.target = null; live.stableSince = 0; live.armed = true; }
+  } else {
+    live.misses = 0;
+    const moved = live.raw ? maxMove(q, live.raw) : 1;
+    live.raw = q;
+    if (moved > 0.03) { live.stableSince = now; if (moved > 0.06) live.armed = true; }
+    live.target = live.target && maxMove(q, live.target) < 0.08
+      ? live.target.map((p, i) => [p[0] * 0.4 + q[i][0] * 0.6, p[1] * 0.4 + q[i][1] * 0.6])
+      : q;
+  }
+  updateLiveUi(now);
+}
+function updateLiveUi(now) {
+  const hint = $('#camHint'), shutter = $('#camShutter');
+  const stableFor = live.raw ? now - live.stableSince : 0;
+  live.state = !live.raw ? 'none' : stableFor >= 600 ? 'pas' : 'gerak';
+  let text = 'Arahkan kamera ke dokumen', cls = '';
+  if (live.state === 'gerak') { text = 'Tahan HP agar diam…'; cls = 'wait'; }
+  if (live.state === 'pas') {
+    cls = 'ok';
+    if (!live.auto) text = 'Pas! Silakan jepret';
+    else if (!live.armed) text = 'Tersimpan ✓ Ganti halaman berikutnya';
+    else text = 'Pas! Jepret otomatis…';
+  } else if (live.auto && !live.armed && live.state === 'none') text = 'Tersimpan ✓ Arahkan ke halaman berikutnya';
+  hint.textContent = text; hint.className = 'cam-hint ' + cls;
+  shutter.classList.toggle('ready', live.state === 'pas');
+  if (live.auto && live.state === 'pas' && live.armed && stableFor >= 1500 && !shooting && now - live.lastShot > 1500) shoot(true);
+}
+function drawLive() {
+  live.raf = requestAnimationFrame(drawLive);
+  const c = $('#camOverlay');
+  const dpr = window.devicePixelRatio || 1, cw = c.clientWidth, ch = c.clientHeight;
+  if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) { c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr); }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, cw, ch);
+  if (!live.target) { live.shown = null; return; }
+  live.shown = live.shown
+    ? live.shown.map((p, i) => [p[0] + (live.target[i][0] - p[0]) * 0.35, p[1] + (live.target[i][1] - p[1]) * 0.35])
+    : live.target.map((p) => p.slice());
+  if (!live.vw) return;
+  // video tampil dengan object-fit: cover
+  const s = Math.max(cw / live.vw, ch / live.vh), ox = (cw - live.vw * s) / 2, oy = (ch - live.vh * s) / 2;
+  const pts = live.shown.map(([x, y]) => [ox + x * live.vw * s, oy + y * live.vh * s]);
+  const ok = live.state === 'pas';
+  g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath();
+  g.fillStyle = ok ? 'rgba(46,230,160,.2)' : 'rgba(255,255,255,.08)'; g.fill();
+  g.lineJoin = 'round'; g.lineWidth = ok ? 4 : 2.5; g.strokeStyle = ok ? '#2ee6a0' : 'rgba(255,255,255,.9)';
+  g.setLineDash(ok ? [] : [10, 8]); g.stroke(); g.setLineDash([]);
+  pts.forEach(([x, y]) => { g.beginPath(); g.arc(x, y, ok ? 7 : 5, 0, Math.PI * 2); g.fillStyle = ok ? '#2ee6a0' : '#fff'; g.fill(); });
+}
+
+function markAuto() {
+  $('#camAuto').classList.toggle('on', live.auto);
+  $('#camAuto').setAttribute('aria-pressed', String(live.auto));
+  $('#camAutoText').textContent = live.auto ? 'Otomatis: Nyala' : 'Otomatis: Mati';
+}
+$('#camAuto').addEventListener('click', () => {
+  live.auto = !live.auto;
+  try { localStorage.setItem('as.autoShot', live.auto ? '1' : '0'); } catch (e) {}
+  markAuto();
+  toast(live.auto ? 'Jepret otomatis nyala: foto diambil sendiri saat garis hijau stabil.' : 'Jepret otomatis mati', 2600);
+});
+
 let shooting = 0;
-$('#camShutter').addEventListener('click', async () => {
+async function shoot(isAuto) {
   if (!cam.stream || shooting > 2) return;
   shooting++;
+  const order = state.nextOrder++; // urutan dikunci saat jepret
+  live.armed = false; live.lastShot = performance.now();
+  const hint = live.raw ? live.raw.map((p) => p.slice()) : null;
+  const hintAspect = live.vw / live.vh;
   const f = $('#camFlash'); f.classList.add('go'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('go')));
-  if (navigator.vibrate) navigator.vibrate(30);
+  if (navigator.vibrate) navigator.vibrate(isAuto ? [20, 60, 20] : 30);
   try {
-    const blob = await grabPhoto();
+    const full = await grabPhoto();
     cam.count++;
-    $('#camCount').textContent = `${cam.count} foto`;
-    const last = $('#camLast');
-    if (last.src) URL.revokeObjectURL(last.src);
-    last.src = URL.createObjectURL(blob); last.hidden = false;
-    await addPage(blob);
+    $('#camCount').textContent = cam.count; $('#camCount').hidden = false;
+    setLastThumb(full);
+    // sudut: deteksi ulang pada foto yang diambil (latar belakang).
+    // Yang tersimpan harus sama dengan garis hijau yang terlihat: kalau hasilnya beda jauh, pakai garis di layar.
+    let corners = await detectAsync(await smallBitmap(full, full.width, full.height), { prior: hint });
+    const sameView = hint && Math.abs(full.width / full.height - hintAspect) < 0.03 * hintAspect;
+    if (sameView && (!corners || maxMove(corners, hint) > 0.05)) corners = hint;
+    await addPage(full, { corners, order });
   } catch (e) { toast('Gagal mengambil foto: ' + e.message); }
   shooting--;
-});
+}
+$('#camShutter').addEventListener('click', () => shoot(false));
 $('#camClose').addEventListener('click', back);
 $('#camDone').addEventListener('click', back);
 $('#camTorch').addEventListener('click', async () => {
@@ -736,7 +725,7 @@ $('#edRotate').addEventListener('click', async () => {
 });
 $('#edFull').addEventListener('click', () => { ed.corners = FULL.map((c) => c.slice()); edDraw(); if (ed.preview) showPreview(); });
 $('#edAuto').addEventListener('click', () => {
-  const q = ed.bmp && detectCorners(ed.bmp);
+  const q = ed.bmp && Detect.detectCorners(ed.bmp);
   if (!q) { toast('Tepi dokumen tidak terdeteksi. Geser titik secara manual.', 3000); return; }
   ed.corners = q; edDraw();
   if (ed.preview) showPreview(); else toast('Sudut terdeteksi. Geser titik bila kurang pas.', 2200);
