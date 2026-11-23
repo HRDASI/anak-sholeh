@@ -1,7 +1,7 @@
 // Service worker Anak Sholeh: agar aplikasi bisa dibuka tanpa internet.
 // Strategi: ambil versi terbaru dari internet, kalau offline pakai simpanan.
-const CACHE = 'anak-sholeh-v2';
-const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
+const CACHE = 'anak-sholeh-v4';
+const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'detect.js', 'detect-worker.js', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
