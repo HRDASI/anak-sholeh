@@ -398,6 +398,25 @@ function segSupport(P, a, b) {
   return (P.hit[k1] - P.hit[k0]) / ins;
 }
 
+// Dukungan tepi per sepertiga sisi: tepi asli ada di sepanjang sisi, bukan hanya sebagian.
+function segSupport3(P, a, b) {
+  let ta = (a[0] - P.x0) * P.dx + (a[1] - P.y0) * P.dy, tb = (b[0] - P.x0) * P.dx + (b[1] - P.y0) * P.dy;
+  if (ta > tb) { const t = ta; ta = tb; tb = t; }
+  const len = tb - ta; if (len < 8) return [0, 0];
+  const k0 = clamp(Math.round(ta + 0.06 * len) + P.D, 0, P.n), k1 = clamp(Math.round(tb - 0.06 * len) + P.D, 0, P.n);
+  const tot = k1 - k0; if (tot <= 0) return [0, 0];
+  const ins = P.ins[k1] - P.ins[k0];
+  if (ins < tot * 0.5) return [-1, -1];
+  let mn = 1;
+  for (let s = 0; s < 3; s++) {
+    const a0 = k0 + Math.round(tot * s / 3), a1 = k0 + Math.round(tot * (s + 1) / 3);
+    const i3 = P.ins[a1] - P.ins[a0];
+    if (i3 < (a1 - a0) * 0.5) continue; // bagian ini di luar foto
+    const v = (P.hit[a1] - P.hit[a0]) / i3; if (v < mn) mn = v;
+  }
+  return [(P.hit[k1] - P.hit[k0]) / ins, mn];
+}
+
 // opts.prior: sudut hasil sebelumnya (0..1) → kandidat yang dekat diberi prioritas (garis tidak loncat-loncat)
 function detectByLines(src, opts = {}) {
   const E = edgeMap(src, opts.maxDim || 480);
@@ -408,7 +427,7 @@ function detectByLines(src, opts = {}) {
     const deg = l.th * 180 / Math.PI;
     (deg >= 45 && deg < 135 ? H : V).push(l);
   }
-  const Hs = H.slice(0, 14), Vs = V.slice(0, 14);
+  const Hs = H.slice(0, 20), Vs = V.slice(0, 20);
   // tepi foto juga boleh jadi sisi (dokumen terpotong)
   Hs.push({ th: Math.PI / 2, r: 0, border: 1 }, { th: Math.PI / 2, r: h - 1, border: 1 });
   Vs.push({ th: 0, r: 0, border: 1 }, { th: 0, r: w - 1, border: 1 });
@@ -416,10 +435,12 @@ function detectByLines(src, opts = {}) {
   const X = Hs.map((a) => Vs.map((c) => intersect(a, c)));
   const prior = opts.prior;
   const cands = [];
+  // [dukungan rata-rata, sisi nyata?, dukungan terlemah per sepertiga]
+  // Tepi foto hanya pilihan terakhir (nilai rendah), supaya kotak tidak "lari" ke pinggir layar.
   const side = (l, a, b) => {
-    if (l.border) return [0.55, 0];
-    const s = segSupport(l.P, a, b);
-    return s < 0 ? [0.5, 0] : [s, 1];
+    if (l.border) return [0.3, 0, 1];
+    const [s, t3] = segSupport3(l.P, a, b);
+    return s < 0 ? [0.5, 0, 1] : [s, 1, t3];
   };
   for (let a = 0; a < Hs.length; a++) for (let b = a + 1; b < Hs.length; b++) {
     for (let c = 0; c < Vs.length; c++) for (let d = c + 1; d < Vs.length; d++) {
@@ -429,16 +450,22 @@ function detectByLines(src, opts = {}) {
       const area = polyArea([pac, pad, pbd, pbc]) / (w * h);
       if (area < 0.12) continue;
       const ss = [side(Hs[a], pac, pad), side(Hs[b], pbc, pbd), side(Vs[c], pac, pbc), side(Vs[d], pad, pbd)];
-      let sum = 0, minS = 1, real = 0;
-      for (const [s, r] of ss) { sum += s; if (s < minS) minS = s; real += r; }
-      if (minS < 0.35 || real < 2) continue;
+      let sum = 0, minS = 1, real = 0, min3 = 1;
+      for (const [s, r, t3] of ss) { sum += s; if (r && s < minS) minS = s; if (r && t3 < min3) min3 = t3; real += r; }
+      // maksimal 1 sisi tepi foto; tiap sisi nyata harus bertepi di pangkal, tengah, dan ujungnya
+      // (menolak kotak rakitan dari garis benda lain, mis. sisi laptop yang diperpanjang menembus buku)
+      // opts.allowBorder === false (kamera): dokumen harus utuh di layar, tepi foto tidak boleh jadi sisi
+      if (minS < 0.35 || real < (opts.allowBorder === false ? 4 : 3) || min3 < 0.35) continue;
       const q = orderCorners([pac, pad, pbd, pbc]);
       if (!quadOk(q, w, h)) continue;
-      let score = (sum / 4) * Math.sqrt(Math.min(area, 0.95)), near = false;
+      // bentuk masuk akal: sisi terpendek ≥ 20% sisi terpanjang (tolak kotak kurus dari garis isi halaman)
+      const sl = [0, 1, 2, 3].map((i) => Math.hypot(q[(i + 1) % 4][0] - q[i][0], q[(i + 1) % 4][1] - q[i][1]));
+      if (Math.min(...sl) < 0.2 * Math.max(...sl)) continue;
+      let score = (sum / 4) * Math.pow(Math.min(area, 0.95), 0.3), near = false; // bonus luas dikurangi
       if (prior) {
         let mv = 0;
         for (let i = 0; i < 4; i++) mv = Math.max(mv, Math.hypot(q[i][0] / w - prior[i][0], q[i][1] / h - prior[i][1]));
-        if (mv < 0.05) { score *= 1 + 0.2 * (1 - mv / 0.05); near = true; } // makin dekat, makin diutamakan
+        if (mv < 0.05) { score *= 1 + 0.4 * (1 - mv / 0.05); near = true; } // makin dekat, makin diutamakan
       }
       cands.push({ score, area, minS, border: 4 - real, q, near });
     }
