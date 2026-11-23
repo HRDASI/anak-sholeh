@@ -249,18 +249,40 @@ function applyFilter(img, filter) {
 }
 
 /* ================= Halaman ================= */
+// Putar gambar n × 90° searah jarum jam
+function rotateCanvas(src, n) {
+  n = ((n % 4) + 4) % 4;
+  const w = src.width, h = src.height;
+  const c = makeCanvas(n % 2 ? h : w, n % 2 ? w : h);
+  const x = c.getContext('2d');
+  x.translate(c.width / 2, c.height / 2); x.rotate(n * Math.PI / 2); x.drawImage(src, -w / 2, -h / 2);
+  return c;
+}
+// Sudut (0..1, urutan tl,tr,br,bl) ikut diputar n × 90° searah jarum jam
+function rotateCorners(k, n) {
+  n = ((n % 4) + 4) % 4;
+  const r = ([px, py]) => [1 - py, px];
+  for (let i = 0; i < n; i++) k = [r(k[3]), r(k[0]), r(k[1]), r(k[2])];
+  return k;
+}
+
 // src: File/Blob atau ImageBitmap. opts.corners: sudut yang sudah dideteksi (null = seluruh foto).
+// opts.rot: putaran hasil (× 90° searah jarum jam), dari posisi HP saat jepret.
 async function addPage(src, opts = {}) {
   const order = opts.order || state.nextOrder++;
   const bmp = typeof ImageBitmap !== 'undefined' && src instanceof ImageBitmap ? src : await decode(src);
   const s = Math.min(1, MAX_STORE / Math.max(bmp.width, bmp.height));
-  const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
-  const c = makeCanvas(w, h);
+  let w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
+  let c = makeCanvas(w, h);
   const ctx = c.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bmp, 0, 0, w, h);
   bmp.close && bmp.close();
-  const auto = 'corners' in opts ? opts.corners : Detect.detectCorners(c);
+  let auto = 'corners' in opts ? opts.corners : Detect.detectCorners(c);
+  if (opts.rot) {
+    c = rotateCanvas(c, opts.rot); w = c.width; h = c.height;
+    if (auto) auto = rotateCorners(auto, opts.rot);
+  }
   const blob = await toBlob(c, 'image/jpeg', 0.9);
   const p = { id: uid(), blob, w, h, corners: auto || FULL.map((x) => x.slice()), filter: state.lastFilter, order };
   state.pages.push(p);
@@ -371,12 +393,14 @@ async function openCamera() {
   const v = $('#camVideo'); v.srcObject = cam.stream;
   $('#camera').hidden = false;
   markAuto();
+  startOrient();
   pushOverlay(closeCamera);
   startLive();
 }
 
 function closeCamera() {
   stopLive();
+  stopOrient();
   if (cam.stream) cam.stream.getTracks().forEach((t) => t.stop());
   cam.stream = cam.track = null;
   $('#camVideo').srcObject = null;
@@ -401,11 +425,49 @@ async function grabPhoto() {
   if (!vw) throw new Error('Kamera belum siap');
   return createImageBitmap(v);
 }
-function setLastThumb(bmp) {
+function setLastThumb(bmp, rot) {
   const s = 112 / Math.max(bmp.width, bmp.height);
-  const c = makeCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
+  let c = makeCanvas(Math.round(bmp.width * s), Math.round(bmp.height * s));
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  if (rot) c = rotateCanvas(c, rot);
   const last = $('#camLast'); last.src = c.toDataURL('image/jpeg', 0.7); last.hidden = false;
+}
+
+/* ---- Arah HP (sensor kemiringan) → hasil foto otomatis tegak ---- */
+// orient.dev: posisi HP (× 90° searah jarum jam yang perlu diterapkan ke foto). 0 = tegak.
+// Saat HP hampir datar (memotret ke bawah), dipakai arah terakhir yang jelas.
+const orient = { dev: 0, listening: false, ios: /iPhone|iPad|iPod/.test(navigator.userAgent) };
+const ORIENT_CENTER = [0, -90, 180, 90]; // sudut tengah (derajat) untuk dev = 0,1,2,3
+function onMotion(e) {
+  const g = e.accelerationIncludingGravity;
+  if (!g || g.x == null || g.y == null) return;
+  let x = g.x, y = g.y;
+  if (orient.ios) { x = -x; y = -y; }
+  if (Math.hypot(x, y) < 4) return; // HP hampir datar: tetap pakai arah terakhir
+  const deg = Math.atan2(x, y) * 180 / Math.PI; // 0 tegak, +90 = atas HP ke kiri, -90 = atas HP ke kanan
+  const diff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+  if (diff(deg, ORIENT_CENTER[orient.dev]) <= 55) return; // histeresis supaya tidak bolak-balik
+  let best = 0;
+  for (let q = 1; q < 4; q++) if (diff(deg, ORIENT_CENTER[q]) < diff(deg, ORIENT_CENTER[best])) best = q;
+  if (best !== orient.dev) { orient.dev = best; markOrient(); }
+}
+// putaran foto = posisi HP dikurangi putaran layar (kalau layar ikut berputar, video sudah tegak)
+function photoRot() {
+  const a = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  const scr = { 0: 0, 90: 3, 180: 2, 270: 1, '-90': 1 }[a] || 0;
+  return (orient.dev - scr + 4) % 4;
+}
+function markOrient() {
+  const r = photoRot();
+  $('#camera').dataset.rot = r;
+  $('#camHint').style.transform = r ? `rotate(${[0, 90, 180, -90][r] * -1}deg)` : '';
+}
+function startOrient() {
+  if (!orient.listening && 'DeviceMotionEvent' in window) { window.addEventListener('devicemotion', onMotion); orient.listening = true; }
+  markOrient();
+}
+function stopOrient() {
+  if (orient.listening) { window.removeEventListener('devicemotion', onMotion); orient.listening = false; }
 }
 
 /* ---- Deteksi langsung di layar kamera ---- */
@@ -540,6 +602,7 @@ async function shoot(isAuto) {
   if (!cam.stream || shooting > 2) return;
   shooting++;
   const order = state.nextOrder++; // urutan dikunci saat jepret
+  const rot = photoRot();          // arah HP saat jepret → hasil otomatis tegak
   live.armed = false; live.lastShot = performance.now();
   const hint = live.raw ? live.raw.map((p) => p.slice()) : null;
   const hintAspect = live.vw / live.vh;
@@ -549,13 +612,13 @@ async function shoot(isAuto) {
     const full = await grabPhoto();
     cam.count++;
     $('#camCount').textContent = cam.count; $('#camCount').hidden = false;
-    setLastThumb(full);
+    setLastThumb(full, rot);
     // sudut: deteksi ulang pada foto yang diambil (latar belakang).
     // Yang tersimpan harus sama dengan garis hijau yang terlihat: kalau hasilnya beda jauh, pakai garis di layar.
     let corners = await detectAsync(await smallBitmap(full, full.width, full.height), { prior: hint });
     const sameView = hint && Math.abs(full.width / full.height - hintAspect) < 0.03 * hintAspect;
     if (sameView && (!corners || maxMove(corners, hint) > 0.05)) corners = hint;
-    await addPage(full, { corners, order });
+    await addPage(full, { corners, order, rot });
   } catch (e) { toast('Gagal mengambil foto: ' + e.message); }
   shooting--;
 }
@@ -702,27 +765,26 @@ $('#edFilters').addEventListener('click', (e) => {
   if (ed.preview) showPreview(); else toast('Filter dipilih. Tekan "Lihat hasil" untuk melihat.', 1800);
 });
 
-$('#edRotate').addEventListener('click', async () => {
+// n = 1: putar kanan (searah jarum jam), n = 3: putar kiri
+async function edRotate(n) {
   if (!ed.bmp) return;
   busy(true, 'Memutar…');
   try {
     const b = ed.bmp;
-    const c = makeCanvas(b.height, b.width);
-    const x = c.getContext('2d');
-    x.translate(c.width, 0); x.rotate(Math.PI / 2); x.drawImage(b, 0, 0);
+    const c = rotateCanvas(b, n);
     const blob = await toBlob(c, 'image/jpeg', 0.92);
     const nb = await createImageBitmap(c);
     b.close && b.close();
     ed.bmp = nb;
     ed.newBlob = blob;
-    const r = ([px, py]) => [1 - py, px];
-    const k = ed.corners;
-    ed.corners = [r(k[3]), r(k[0]), r(k[1]), r(k[2])];
+    ed.corners = rotateCorners(ed.corners, n);
     edLayout(); edDraw();
     if (ed.preview) await showPreview();
   } catch (e) { toast('Gagal memutar'); }
   busy(false);
-});
+}
+$('#edRotateL').addEventListener('click', () => edRotate(3));
+$('#edRotateR').addEventListener('click', () => edRotate(1));
 $('#edFull').addEventListener('click', () => { ed.corners = FULL.map((c) => c.slice()); edDraw(); if (ed.preview) showPreview(); });
 $('#edAuto').addEventListener('click', () => {
   const q = ed.bmp && Detect.detectCorners(ed.bmp);
