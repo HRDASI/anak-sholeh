@@ -152,7 +152,9 @@ svg { width: 22px; height: 22px; flex: none; }
 .chips.light button { background: #eef2f0; color: var(--ink); }
 .chips.light button.on { background: var(--green); color: #fff; }
 .ed-tools { display: flex; justify-content: space-around; padding: 4px 8px calc(12px + var(--safe-b)); border-top: 1px solid #26302c; }
-.ed-tools button { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 6px; font-size: 13px; color: #d6e0db; min-width: 76px; }
+.ed-tools button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 2px; font-size: 12px; color: #d6e0db; text-align: center; }
+#camera[data-rot="1"] .cam-mid, #camera[data-rot="3"] .cam-mid { align-items: center; }
+.cam-hint { transition: transform .25s, background .2s; white-space: nowrap; }
 
 /* Lembar PDF */
 .sheet { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
