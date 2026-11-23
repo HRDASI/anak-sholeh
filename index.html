@@ -49,17 +49,23 @@
 <!-- ===== Kamera ===== -->
 <section id="camera" class="screen cam" hidden>
   <video id="camVideo" playsinline muted autoplay></video>
+  <canvas id="camOverlay" class="cam-overlay"></canvas>
   <div id="camFlash" class="flash"></div>
   <div class="cam-top">
     <button id="camClose" class="round" aria-label="Tutup">✕</button>
-    <span id="camCount" class="pill">0 foto</span>
-    <button id="camTorch" class="round" aria-label="Lampu" hidden>
-      <svg viewBox="0 0 24 24"><path d="M13 2L5 14h6l-1 8 8-12h-6z" fill="currentColor"/></svg>
-    </button>
+    <div class="cam-right">
+      <button id="camAuto" class="auto-btn" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 9v4l3 2M9 2h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span id="camAutoText">Otomatis: Mati</span>
+      </button>
+      <button id="camTorch" class="round" aria-label="Lampu" hidden>
+        <svg viewBox="0 0 24 24"><path d="M13 2L5 14h6l-1 8 8-12h-6z" fill="currentColor"/></svg>
+      </button>
+    </div>
   </div>
-  <div class="cam-guide"></div>
+  <div class="cam-mid"><span id="camHint" class="cam-hint">Arahkan kamera ke dokumen</span></div>
   <div class="cam-bottom">
-    <div class="cam-last"><img id="camLast" alt="" hidden></div>
+    <div class="cam-last"><img id="camLast" alt="" hidden><span id="camCount" class="count-badge" hidden>0</span></div>
     <button id="camShutter" class="shutter" aria-label="Ambil foto"></button>
     <button id="camDone" class="btn primary">Selesai</button>
   </div>
@@ -120,6 +126,7 @@
 <input type="file" id="inCamera" accept="image/*" capture="environment" hidden>
 <input type="file" id="inGallery" accept="image/*" multiple hidden>
 
+<script src="detect.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
